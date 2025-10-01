@@ -188,7 +188,7 @@ class DeltaUtilities:
             storage_options: Storage options for the filesystem
         """
         self.path = path
-        self.storage_options = storage_options or {}
+        self.provided_storage_options = storage_options or {}
 
         # Set up filesystem
         if storage_options:
@@ -201,26 +201,37 @@ class DeltaUtilities:
         self.is_aws = path_lower.startswith(("s3://", "s3a://"))
         self.is_gcp = path_lower.startswith(("gs://", "gcs://"))
         self.is_azure = path_lower.startswith(("abfss://", "abfs://", "adl://"))
-        self.storage_options = self._get_storage_options()
 
         # Initialize utility classes
         self.aws_utils = AWSUtilities()
         self.gcp_utils = GCPUtilities()
         self.azure_utils = AzureUtilities()
+        
+        # Get storage options (merges provided with auto-detected)
+        self.storage_options = self._get_storage_options()
 
     def _get_storage_options(self) -> Dict[str, str]:
         """
         Get storage options based on the path and detected cloud provider.
+        
+        Merges user-provided options with auto-detected options,
+        with user-provided options taking precedence.
 
         Returns:
             Dict with storage options
         """
+        # Start with auto-detected options
+        auto_options = {}
         if self.is_aws:
-            return self.aws_utils.get_s3_storage_options(self.path)
+            auto_options = self.aws_utils.get_s3_storage_options(self.path)
         elif self.is_azure:
-            return self.azure_utils.get_azure_storage_options(self.path)
-        else:
-            return {}
+            auto_options = self.azure_utils.get_azure_storage_options(self.path)
+        
+        # Merge with provided options (provided takes precedence)
+        merged_options = auto_options.copy()
+        merged_options.update(self.provided_storage_options)
+        
+        return merged_options
 
     def get_table(self) -> Optional[DeltaTable]:
         """

@@ -43,6 +43,7 @@ class DeltaJSONEncoder(json.JSONEncoder):
             return obj.isoformat()
         elif isinstance(obj, Decimal):
             return str(obj)
+        return super().default(obj)
 
 
 @dataclass
