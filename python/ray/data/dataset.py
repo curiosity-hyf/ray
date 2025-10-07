@@ -3459,7 +3459,7 @@ class Dataset:
                 If None, Ray automatically determines optimal concurrency based on
                 cluster resources.
 
-            delta_kwargs: Additional Delta Lake write options passed to delta-rs.
+            **delta_kwargs: Additional Delta Lake write options passed to delta-rs.
                 Common options include ``schema_mode`` for schema evolution,
                 ``name`` and ``description`` for table metadata, ``configuration``
                 for Delta table properties, and ``engine`` for the Delta Lake engine.

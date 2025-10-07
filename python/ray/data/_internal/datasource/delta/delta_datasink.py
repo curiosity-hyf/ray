@@ -79,8 +79,7 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         if mode not in ["append", "overwrite", "error", "ignore"]:
             if mode == "merge":
                 raise ValueError(
-                    "Merge mode not supported in v1. "
-                    "Use 'append' or 'overwrite' modes."
+                    "Merge mode not supported in v1. Use 'append' or 'overwrite' modes."
                 )
             raise ValueError(
                 f"Invalid mode '{mode}'. "
