@@ -41,7 +41,7 @@ def convert_pyarrow_filter_to_sql(
     Examples:
         Simple equality filter:
         >>> convert_pyarrow_filter_to_sql([("year", "=", "2024")])
-        'year = \\'2024\\''
+        "year = '2024'"
 
         Numeric comparison:
         >>> convert_pyarrow_filter_to_sql([("age", ">", 18)])

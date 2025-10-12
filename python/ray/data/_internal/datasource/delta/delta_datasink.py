@@ -415,13 +415,9 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             - partition_dict: Dict like {"year": "2024", "month": "10"}
 
         Example:
-            >>> self.partition_cols = ["year", "month"]
-            >>> partition_values = ("2024", "10")
-            >>> path, dict = self._build_partition_path(partition_values)
-            >>> path
-            "year=2024/month=10/"
-            >>> dict
-            {"year": "2024", "month": "10"}
+            Given partition_cols=["year", "month"] and partition_values=("2024", "10"),
+            this returns ("year=2024/month=10/", {"year": "2024", "month": "10"}).
+            For non-partitioned tables, it returns ("", {}).
         """
         if not self.partition_cols or not partition_values:
             return "", {}

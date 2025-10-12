@@ -3,7 +3,7 @@ Delta Lake datasource package for Ray Data.
 
 This package provides Delta Lake functionality including:
 - Read/write with ACID transactions
-- Change Data Feed (CDF) for incremental processing
+- Change Data Feed (CDF) for incremental processing with streaming execution
 - Time travel and partition filtering
 - Multi-cloud storage support (S3, GCS, Azure, HDFS)
 - Unity Catalog compatibility
@@ -16,10 +16,8 @@ from .config import (
     WriteMode,
 )
 
-# CDF reading
-from .delta_cdf import read_delta_cdf_distributed
-
-# Core datasource and datasink
+# Core datasources and datasink
+from .delta_cdf_datasource import DeltaCDFDatasource
 from .delta_datasink import DeltaDatasink
 from .delta_datasource import DeltaDatasource
 
@@ -34,6 +32,7 @@ from .utilities import (
 
 __all__ = [
     # Core classes
+    "DeltaCDFDatasource",
     "DeltaDatasink",
     "DeltaDatasource",
     # Configuration classes
@@ -48,6 +47,4 @@ __all__ = [
     "GCPUtilities",
     # Helper utilities
     "try_get_deltatable",
-    # CDF reading
-    "read_delta_cdf_distributed",
 ]

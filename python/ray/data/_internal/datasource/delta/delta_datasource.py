@@ -6,9 +6,13 @@ including support for time travel, partition filtering, and Change Data Feed (CD
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Union
+
+import pyarrow as pa
 
 from ray.data._internal.util import _check_import
+from ray.data.block import Block, BlockMetadata
+from ray.data.datasource import Datasource, ReadTask
 from ray.data.datasource.partitioning import Partitioning
 from ray.util.annotations import PublicAPI
 
@@ -16,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 @PublicAPI(stability="alpha")
-class DeltaDatasource:
+class DeltaDatasource(Datasource):
     """
     Datasource for reading Delta Lake tables with Ray Data.
 
@@ -26,8 +30,10 @@ class DeltaDatasource:
     - Change Data Feed (CDF): Read incremental changes between versions
     - Multi-cloud support: S3, GCS, Azure, HDFS, local filesystems
 
-    The datasource uses Ray's read_parquet() underneath after resolving
-    Delta table metadata and file paths, ensuring efficient distributed reads.
+    The datasource uses Ray's ReadTask pattern for proper streaming execution.
+    For snapshot reads, it delegates to read_parquet() after resolving Delta table
+    metadata and file paths. For CDF mode, it creates streaming ReadTasks that yield
+    batches incrementally.
 
     Examples:
         Read latest version of Delta table:
@@ -56,9 +62,10 @@ class DeltaDatasource:
         >>> ds = datasource.read_as_dataset() # doctest: +SKIP
 
     Note:
-        This datasource delegates to read_parquet() after resolving Delta table
-        metadata, ensuring efficient distributed file reads. For CDF mode, it
-        uses distributed version range splitting across Ray tasks.
+        This datasource properly integrates with Ray Data's streaming execution.
+        Snapshot reads delegate to read_parquet() for efficient distributed file reads.
+        CDF reads use streaming ReadTasks that yield batches incrementally without
+        materializing entire version ranges in memory.
     """
 
     def __init__(
@@ -201,6 +208,40 @@ class DeltaDatasource:
 
         return file_paths
 
+    def get_read_tasks(
+        self, parallelism: int, per_task_row_limit: Optional[int] = None
+    ) -> List[ReadTask]:
+        """
+        Get read tasks for Delta table snapshot reads.
+
+        For snapshot reads, returns empty list to signal that read_as_dataset()
+        should delegate to read_parquet for efficiency.
+
+        For CDF reads, this datasource shouldn't be used directly - use
+        DeltaCDFDatasource instead.
+
+        Args:
+            parallelism: Number of parallel read tasks to create
+            per_task_row_limit: Maximum rows per task (optional)
+
+        Returns:
+            Empty list (snapshot reads use read_parquet delegation)
+        """
+        # Snapshot reads use read_parquet delegation
+        # Return empty list to signal that read_as_dataset should be used
+        return []
+
+    def estimate_inmemory_data_size(self) -> Optional[int]:
+        """
+        Estimate in-memory data size for the Delta table.
+
+        Returns:
+            None (unknown for Delta snapshot reads)
+        """
+        # For snapshot reads, we don't have file metadata readily available
+        # Return None and let Ray Data's execution engine handle it
+        return None
+
     def read_as_dataset(
         self,
         *,
@@ -216,9 +257,8 @@ class DeltaDatasource:
         """
         Read Delta table as Ray Dataset.
 
-        This method delegates to either:
-        1. CDF distributed reading (if cdf=True)
-        2. Standard Parquet reading via read_parquet (if cdf=False)
+        For CDF mode, delegates to DeltaCDFDatasource.
+        For snapshot mode, delegates to read_parquet for efficiency.
 
         Args:
             parallelism: Parallelism level (deprecated, use override_num_blocks)
@@ -232,60 +272,47 @@ class DeltaDatasource:
 
         Returns:
             Dataset containing Delta table data
-
-        Raises:
-            ImportError: If required packages not installed
-            ValueError: If parameters are invalid
         """
-        # Handle Change Data Feed (CDF) mode
         if self.cdf:
-            return self._read_cdf(override_num_blocks)
+            # Delegate to DeltaCDFDatasource for streaming CDF execution
+            from ray.data._internal.datasource.delta.delta_cdf_datasource import (
+                DeltaCDFDatasource,
+            )
+            from ray.data._internal.datasource.delta.utilities import (
+                convert_pyarrow_filter_to_sql,
+            )
 
-        # Regular snapshot read - delegate to read_parquet
-        return self._read_snapshot(
-            parallelism=parallelism,
-            ray_remote_args=ray_remote_args,
-            meta_provider=meta_provider,
-            partition_filter=partition_filter,
-            shuffle=shuffle,
-            include_paths=include_paths,
-            concurrency=concurrency,
-            override_num_blocks=override_num_blocks,
-        )
+            # Convert PyArrow filters to SQL predicate for Delta Lake CDF
+            pyarrow_filters = self.arrow_parquet_args.get("filters")
+            sql_predicate = convert_pyarrow_filter_to_sql(pyarrow_filters)
 
-    def _read_cdf(self, override_num_blocks: Optional[int]):
-        """
-        Read Change Data Feed with distributed execution.
+            cdf_datasource = DeltaCDFDatasource(
+                path=self.path,
+                starting_version=self.starting_version,
+                ending_version=self.ending_version,
+                storage_options=self.storage_options,
+                columns=self.columns,
+                predicate=sql_predicate,
+            )
 
-        Delegates to distributed CDF implementation that splits version
-        ranges across Ray tasks.
-
-        Args:
-            override_num_blocks: Number of parallel tasks
-
-        Returns:
-            Dataset with CDF records
-        """
-        from ray.data._internal.datasource.delta.delta_cdf import (
-            read_delta_cdf_distributed,
-        )
-        from ray.data._internal.datasource.delta.utilities import (
-            convert_pyarrow_filter_to_sql,
-        )
-
-        # Convert PyArrow filters to SQL predicate for Delta Lake CDF
-        pyarrow_filters = self.arrow_parquet_args.get("filters")
-        sql_predicate = convert_pyarrow_filter_to_sql(pyarrow_filters)
-
-        return read_delta_cdf_distributed(
-            path=self.path,
-            starting_version=self.starting_version,
-            ending_version=self.ending_version,
-            columns=self.columns,
-            predicate=sql_predicate,
-            storage_options=self.storage_options,
-            override_num_blocks=override_num_blocks,
-        )
+            return cdf_datasource.read_as_dataset(
+                parallelism=parallelism,
+                ray_remote_args=ray_remote_args,
+                concurrency=concurrency,
+                override_num_blocks=override_num_blocks,
+            )
+        else:
+            # Snapshot reads delegate to read_parquet for efficiency
+            return self._read_snapshot(
+                parallelism=parallelism,
+                ray_remote_args=ray_remote_args,
+                meta_provider=meta_provider,
+                partition_filter=partition_filter,
+                shuffle=shuffle,
+                include_paths=include_paths,
+                concurrency=concurrency,
+                override_num_blocks=override_num_blocks,
+            )
 
     def _read_snapshot(
         self,
@@ -339,6 +366,10 @@ class DeltaDatasource:
             override_num_blocks=override_num_blocks,
             **self.arrow_parquet_args,
         )
+
+    def get_name(self) -> str:
+        """Return human-readable name for this datasource."""
+        return "DeltaLake"
 
     def get_table_version(self) -> int:
         """
