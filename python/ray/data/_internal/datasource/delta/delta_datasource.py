@@ -180,7 +180,7 @@ class DeltaDatasource(Datasource):
                 dt_kwargs["version"] = self.version
 
             # Enable deletion vector handling for correctness
-            dt_kwargs["options"] = {"ignore_deletion_vectors": False}
+-            dt_kwargs["options"] = {"ignore_deletion_vectors": False}
 
             self._delta_table = DeltaTable(self.path, **dt_kwargs)
 
