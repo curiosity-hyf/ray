@@ -350,6 +350,9 @@ void LocalResourceManager::PopulateResourceViewSyncMessage(
         case WorkFootprint::NODE_WORKERS:
           resource_view_sync_message.add_node_activity("Busy workers on node.");
           break;
+        case WorkFootprint::PULLING_TASK_ARGUMENTS:
+          resource_view_sync_message.add_node_activity("Pulling task arguments.");
+          break;
         default:
           UNREACHABLE;
         }
