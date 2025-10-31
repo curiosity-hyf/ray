@@ -20,24 +20,22 @@ from ray.tests.conftest import *  # noqa
     ["append", "overwrite"],
 )
 def test_delta_read_basic(tmp_path, batch_size, write_mode):
-    import pandas as pd
-    from deltalake import write_deltalake
-
     # Parse the data path.
     path = os.path.join(tmp_path, "tmp_test_delta")
 
-    # Create a sample Delta Lake table
-    # Convert pandas DataFrame to PyArrow table for deltalake
-    df = pd.DataFrame(
-        {"x": [42] * batch_size, "y": ["a"] * batch_size, "z": [3.14] * batch_size}
-    )
-    table = pa.Table.from_pandas(df)
+    # Create a sample Delta Lake table using Ray Data's write_delta
+    # This avoids Arrow C Data Interface compatibility issues with deltalake library
+    data_items = [{"x": 42, "y": "a", "z": 3.14} for _ in range(batch_size)]
+    ds_write = ray.data.from_items(data_items)
 
     if write_mode == "append":
-        write_deltalake(path, table, mode=write_mode)
-        write_deltalake(path, table, mode=write_mode)
+        ds_write.write_delta(path, mode="append")
+        ds_write.write_delta(path, mode="append")
     elif write_mode == "overwrite":
-        write_deltalake(path, table, mode=write_mode)
+        ds_write.write_delta(path, mode="append")
+        # For overwrite, first write then overwrite
+        ds_write_overwrite = ray.data.from_items(data_items)
+        ds_write_overwrite.write_delta(path, mode="overwrite")
 
     # Read the Delta Lake table
     ds = ray.data.read_delta(path)

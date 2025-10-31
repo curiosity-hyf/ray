@@ -675,13 +675,27 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
 
         # Aggregate AddActions from all distributed tasks
         all_file_actions = self._collect_file_actions(write_result)
-        if not all_file_actions:
-            # No data to commit (all blocks were empty)
-            logger.info(f"No files to commit for Delta table at {self.path}")
-            return
 
         # Check if table exists (may have been created concurrently)
         existing_table = try_get_deltatable(self.path, self.storage_options)
+
+        # Handle empty dataset case
+        if not all_file_actions:
+            # No data to commit (all blocks were empty)
+            if self.schema and not existing_table:
+                # Create empty table with specified schema
+                logger.info(
+                    f"Creating empty Delta table at {self.path} with specified schema"
+                )
+                self._create_empty_table()
+                return
+            else:
+                # No schema specified or table already exists, nothing to do
+                logger.info(
+                    f"No files to commit for Delta table at {self.path}. "
+                    f"Skipping table creation."
+                )
+                return
 
         if existing_table:
             # Table exists: Append or overwrite using transaction
@@ -707,6 +721,44 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             all_file_actions.extend(task_file_actions)
         return all_file_actions
 
+    def _create_empty_table(self) -> None:
+        """
+        Create empty Delta table with specified schema.
+
+        This is used when the dataset is empty but a schema was explicitly provided.
+        Creates the table structure without any data files.
+
+        Raises:
+            ValueError: If no schema is specified (required for empty tables)
+        """
+        from deltalake.transaction import create_table_with_add_actions
+
+        if not self.schema:
+            raise ValueError(
+                "Cannot create empty Delta table without explicit schema. "
+                "Provide schema parameter to write_delta()."
+            )
+
+        # Convert schema to Delta format
+        delta_schema = self._convert_schema_to_delta(self.schema)
+
+        # Create table with empty file list
+        create_table_with_add_actions(
+            table_uri=self.path,
+            schema=delta_schema,
+            add_actions=[],  # Empty list - no data files
+            mode=self.mode.value,
+            partition_by=self.partition_cols or None,
+            name=self.delta_write_config.name,
+            description=self.delta_write_config.description,
+            configuration=self.delta_write_config.configuration,
+            storage_options=self.storage_options,
+            commit_properties=self.delta_write_config.commit_properties,
+            post_commithook_properties=self.delta_write_config.post_commithook_properties,
+        )
+
+        logger.info(f"Created empty Delta table at {self.path}")
+
     def _create_table_with_files(self, file_actions: List["AddAction"]) -> None:
         """
         Create new Delta table and commit files in single transaction.
@@ -718,12 +770,11 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             Schema is inferred from first Parquet file plus partition columns.
             All table metadata (name, description, configuration) is set atomically.
         """
-        from deltalake import Schema as DeltaSchema
         from deltalake.transaction import create_table_with_add_actions
 
         # Infer schema from written files
         table_schema = self._infer_schema(file_actions)
-        delta_schema = DeltaSchema.from_arrow(table_schema)
+        delta_schema = self._convert_schema_to_delta(table_schema)
 
         # Create table with all files in single atomic transaction
         # This writes the _delta_log/00000000000000000000.json file
@@ -840,6 +891,153 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             pass
 
         return pa.string()
+
+    def _convert_schema_to_delta(self, pa_schema: pa.Schema) -> "Any":
+        """
+        Convert PyArrow schema to Delta schema with fallback for compatibility.
+
+        This method tries to use the Arrow C Data Interface (DeltaSchema.from_arrow())
+        first, which is the preferred method. If that fails due to compatibility
+        issues between PyArrow and deltalake versions, it falls back to a JSON-based
+        conversion.
+
+        Args:
+            pa_schema: PyArrow schema to convert
+
+        Returns:
+            Delta Schema object
+
+        Raises:
+            ValueError: If conversion fails with both methods
+        """
+        from deltalake import Schema as DeltaSchema
+
+        # Try using Arrow C Data Interface (preferred method)
+        try:
+            return DeltaSchema.from_arrow(pa_schema)
+        except (ValueError, TypeError) as e:
+            logger.warning(
+                f"Failed to convert PyArrow schema using Arrow C Data Interface: {e}. "
+                f"Falling back to JSON-based conversion."
+            )
+
+        # Fallback: Convert via JSON
+        try:
+            schema_json = self._pyarrow_schema_to_delta_json(pa_schema)
+            return DeltaSchema.from_json(schema_json)
+        except Exception as e:
+            raise ValueError(
+                f"Failed to convert PyArrow schema to Delta schema. "
+                f"Both Arrow C Data Interface and JSON conversion failed. "
+                f"Error: {e}"
+            ) from e
+
+    def _pyarrow_schema_to_delta_json(self, pa_schema: pa.Schema) -> str:
+        """
+        Convert PyArrow schema to Delta schema JSON format.
+
+        Delta Lake uses Spark SQL schema format, which is similar to Parquet schema.
+        This method manually converts PyArrow types to Delta types.
+
+        Reference:
+            Delta Lake Protocol: https://github.com/delta-io/delta/blob/master/PROTOCOL.md
+
+        Args:
+            pa_schema: PyArrow schema to convert
+
+        Returns:
+            JSON string in Delta schema format
+
+        Example:
+            >>> # For schema with fields: id (int64), name (string)
+            >>> # Returns:
+            >>> # {
+            >>> #   "type": "struct",
+            >>> #   "fields": [
+            >>> #     {"name": "id", "type": "long", "nullable": true, "metadata": {}},
+            >>> #     {"name": "name", "type": "string", "nullable": true, "metadata": {}}
+            >>> #   ]
+            >>> # }
+        """
+        fields = []
+        for field in pa_schema:
+            delta_field = {
+                "name": field.name,
+                "type": self._pyarrow_type_to_delta_type(field.type),
+                "nullable": field.nullable,
+                "metadata": {},
+            }
+            fields.append(delta_field)
+
+        schema_dict = {"type": "struct", "fields": fields}
+
+        return json.dumps(schema_dict)
+
+    def _pyarrow_type_to_delta_type(self, pa_type: pa.DataType) -> str:
+        """
+        Convert PyArrow data type to Delta Lake type string.
+
+        Reference:
+            PyArrow Types: https://arrow.apache.org/docs/python/api/datatypes.html
+            Delta Lake Types: https://github.com/delta-io/delta/blob/master/PROTOCOL.md#primitive-types
+
+        Args:
+            pa_type: PyArrow data type
+
+        Returns:
+            Delta type string (e.g., "long", "string", "double")
+
+        Raises:
+            ValueError: If type is not supported
+        """
+        # Integer types
+        if pa.types.is_int8(pa_type):
+            return "byte"
+        elif pa.types.is_int16(pa_type):
+            return "short"
+        elif pa.types.is_int32(pa_type):
+            return "integer"
+        elif pa.types.is_int64(pa_type):
+            return "long"
+        # Unsigned integer types (cast to next larger signed type)
+        elif pa.types.is_uint8(pa_type):
+            return "short"
+        elif pa.types.is_uint16(pa_type):
+            return "integer"
+        elif pa.types.is_uint32(pa_type):
+            return "long"
+        elif pa.types.is_uint64(pa_type):
+            return "long"  # Note: May lose precision for very large values
+        # Floating point types
+        elif pa.types.is_float32(pa_type):
+            return "float"
+        elif pa.types.is_float64(pa_type):
+            return "double"
+        # String types
+        elif pa.types.is_string(pa_type) or pa.types.is_large_string(pa_type):
+            return "string"
+        elif pa.types.is_binary(pa_type) or pa.types.is_large_binary(pa_type):
+            return "binary"
+        # Boolean type
+        elif pa.types.is_boolean(pa_type):
+            return "boolean"
+        # Date and time types
+        elif pa.types.is_date32(pa_type) or pa.types.is_date64(pa_type):
+            return "date"
+        elif pa.types.is_timestamp(pa_type):
+            return "timestamp"
+        # Decimal type
+        elif pa.types.is_decimal(pa_type):
+            precision = pa_type.precision
+            scale = pa_type.scale
+            return f"decimal({precision},{scale})"
+        else:
+            raise ValueError(
+                f"Unsupported PyArrow type for Delta Lake: {pa_type}. "
+                f"Supported types: integer types (int8-int64), "
+                f"floating types (float32, float64), string, binary, "
+                f"boolean, date, timestamp, decimal"
+            )
 
     def on_write_failed(self, error: Exception) -> None:
         """Handle write failure."""
